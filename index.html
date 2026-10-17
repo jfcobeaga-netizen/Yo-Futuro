@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="es" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Yo Futuro</title>
+  
+  <!-- Configuración PWA para Android -->
+  <meta name="theme-color" content="#000000" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
+  <!-- Dependencias CDN autónomas (sin tokens ni límites) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              400: '#34d399',
+              500: '#10b981',
+              600: '#059669',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/dexie@3.2.4/dist/dexie.min.js"></script>
+
+  <style>
+    /* Estilos nativos para celular */
+    body {
+      background-color: #000000;
+      color: #f4f4f5;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+    }
+    input, select, button {
+      font-size: 16px !important; /* Evita zoom automático en Safari/Chrome Android */
+    }
+  </style>
+</head>
+<body class="bg-black text-zinc-100">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // --- BASE DE DATOS LOCAL INDEXEDDB (Dexie) ---
+    const db = new Dexie('YoFuturoAppDB');
+    db.version(1).stores({
+      exercises: 'id, name, primaryMuscle',
+      routines: 'id, name, createdAt',
+      workoutSessions: 'id, routineId, startTime',
+      dietPlan: 'id, mealTime',
+      loggedMeals: 'id, date, timestamp, mealTime',
+      waterLogs: 'id, date, timestamp',
+      weightEntries: 'id, date, timestamp',
+      bodyMeasurements: 'id, date, timestamp',
+      progressPhotos: 'id, date, pose'
+    });
+
+    // --- UTILIDADES MATEMÁTICAS Y FECHAS ---
+    function calculate1RM(weight, reps) {
+      if (reps <= 0 || weight <= 0) return 0;
+      if (reps === 1) return weight;
+      if (reps <= 10) return Math.round((weight / (1.0278 - 0.0278 * reps)) * 10) / 10;
+      return Math.round(weight * (1 + reps / 30) * 10) / 10;
+    }
+
+    function calculateWeightMovingAverage(entries) {
+      const sorted = [...entries].sort((a, b) => a.date.localeCompare(b.date));
+      return sorted.map((entry, index) => {
+        const windowStart = Math.max(0, index - 6);
+        const windowEntries = sorted.slice(windowStart, index + 1);
+        const sum = windowEntries.reduce((acc, curr) => acc + curr.weightKg, 0);
+        return {
+          ...entry,
+          movingAverage7d: Math.round((sum / windowEntries.length) * 100) / 100
+        };
+      });
+    }
+
+    function formatDate(dateStr) {
+      if (!dateStr) return '';
+      const parts = dateStr.split('-');
+      return parts.length === 3 ? `${parts[2]}/${parts[1]}/${parts[0]}` : dateStr;
+    }
+
+    // --- ICONOS NATIVOS SVG VECTORIAL (Rápidos y sin fallas de red) ---
+    const Icon = ({ name, className = "w-5 h-5" }) => {
+      const icons = {
+        home: <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>,
+        dumbbell: <path d="m6.5 6.5 11 11M21 21l-1-1m-3-7 4 4M3 3l1 1m3 7-4-4M18 10l-4-4m-4 12-4-4m14-4 2 2m-18 6 2 2m2-18 2 2m12 14 2 2"/>,
+        utensils: <path d="M18 2v6a3 3 0 0 1-3 3 3 3 0 0 1-3-3V2m-5 0v18M2 2v3a3 3 0 0 0 3 3h1v12"/>,
+        trending: <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/>,
+        settings: <circle cx="12" cy="12" r="3"/>,
+        play: <polygon points="5 3 19 12 5 21 5 3"/>,
+        plus: <path d="M5 12h14m-7-7v14"/>,
+        check: <polyline points="20 6 9 17 4 12"/>,
+        trash: <path d="M3 6h18m-2 0v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6m3 0V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>,
+        droplet: <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>,
+        scale: <path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1zm-14 0 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1zm9-9V3m-4 0h8m-4 18v-8"/>,
+        camera: <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/>,
+        download: <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4m-7-5v9m0 0-4-4m4 4 4-4"/>,
+        upload: <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4m-7-9v9m0-9-4 4m4-4 4 4"/>,
+        chevronLeft: <polyline points="15 18 9 12 15 6"/>,
+        chevronRight: <polyline points="9 18 15 12 9 6"/>,
+      };
+      return (
+        <svg className={className} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+          {icons[name] || null}
+        </svg>
+      );
+    };
+
+    // --- TEMPORIZADOR DE DESCANSO AUTOMÁTICO ---
+    function RestTimer({ seconds, onClose }) {
+      const [left, setLeft] = useState(seconds);
+
+      useEffect(() => {
+        if (left <= 0) {
+          if ('vibrate' in navigator) navigator.vibrate([200, 100, 200, 100, 400]);
+          try {
+            const ctx = new (window.AudioContext || window.webkitAudioContext)();
+            const osc = ctx.createOscillator();
+            osc.connect(ctx.destination);
+            osc.frequency.setValueAtTime(880, ctx.currentTime);
+            osc.start();
+            osc.stop(ctx.currentTime + 0.3);
+          } catch(e){}
+          return;
+        }
+        const timer = setInterval(() => setLeft(l => l - 1), 1000);
+        return () => clearInterval(timer);
+      }, [left]);
+
+      const mins = Math.floor(left / 60);
+      const secs = left % 60;
+
+      return (
+        <div className="fixed bottom-20 left-4 right-4 z-50 bg-zinc-900 border border-brand-500/50 p-4 rounded-2xl shadow-2xl flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <span className="font-mono text-2xl font-black text-brand-400">
+              {mins}:{secs < 10 ? '0' : ''}{secs}
+            </span>
+            <div>
+              <p className="text-xs uppercase font-bold text-zinc-400">Descanso en Curso</p>
+              <p className="text-xs text-zinc-200">{left === 0 ? '¡A la siguiente serie!' : 'Recuperando fuerza'}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setLeft(l => l + 30)} className="px-3 py-1.5 bg-zinc-800 text-xs font-bold text-brand-400 rounded-lg">+30s</button>
+            <button onClick={onClose} className="p-2 text-zinc-400 hover:text-white">✕</button>
+          </div>
+        </div>
+      );
+    }
+
+    // --- 1. DASHBOARD DE INICIO ---
+    function HomeDashboard({ onNav }) {
+      const today = new Date().toISOString().split('T')[0];
+      const [lastWorkout, setLastWorkout] = useState(null);
+      const [latestWeight, setLatestWeight] = useState(null);
+      const [caloriesToday, setCaloriesToday] = useState(0);
+      const [waterToday, setWaterToday] = useState(0);
+
+      useEffect(() => {
+        db.workoutSessions.orderBy('startTime').reverse().first().then(setLastWorkout);
+        db.weightEntries.orderBy('date').toArray().then(entries => {
+          if (entries.length) {
+            const calculated = calculateWeightMovingAverage(entries);
+            setLatestWeight(calculated[calculated.length - 1]);
+          }
+        });
+        db.loggedMeals.where('date').equals(today).toArray().then(meals => {
+          setCaloriesToday(meals.reduce((acc, m) => acc + m.calories, 0));
+        });
+        db.waterLogs.where('date').equals(today).toArray().then(logs => {
+          setWaterToday(logs.reduce((acc, w) => acc + w.amountMl, 0));
+        });
+      }, []);
+
+      return (
+        <div className="p-4 space-y-4 max-w-lg mx-auto pb-28">
+          <div>
+            <span className="text-xs font-mono font-bold tracking-widest text-brand-400 uppercase">Yo Futuro</span>
+            <h1 className="text-2xl font-black text-white mt-0.5">Centro de Control</h1>
+            <p className="text-xs text-zinc-400 italic">“Tu progreso. Tus decisiones. Tu evolución.”</p>
+          </div>
+
+          <button
+            onClick={() => onNav('entreno')}
+            className="w-full rounded-2xl bg-gradient-to-r from-brand-500 to-teal-400 p-4 text-black shadow-lg flex items-center justify-between active:scale-95 transition"
+          >
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 rounded-xl bg-black/15 flex items-center justify-center">
+                <Icon name="play" className="w-5 h-5 fill-black stroke-black" />
+              </div>
+              <div className="text-left">
+                <span className="text-[11px] font-black uppercase text-black/70">Sesión Activa</span>
+                <h3 className="text-base font-black leading-tight">Iniciar Entrenamiento</h3>
+              </div>
+            </div>
+            <Icon name="chevronRight" className="w-6 h-6 stroke-[3]" />
+          </button>
+
+          <div onClick={() => onNav('nutricion')} className="rounded-2xl bg-zinc-900 border border-zinc-800 p-4 active:scale-98 transition cursor-pointer">
+            <div className="flex justify-between items-center pb-2 border-b border-zinc-800">
+              <div className="flex items-center gap-2">
+                <Icon name="utensils" className="w-4 h-4 text-brand-400" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-white">Nutrición Hoy</h3>
+              </div>
+              <span className="text-xs font-mono text-zinc-400">{formatDate(today)}</span>
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-4">
+              <div>
+                <span className="text-xs text-zinc-400 block">Calorías</span>
+                <span className="text-xl font-mono font-black text-white">{caloriesToday}</span>
+                <span className="text-xs text-zinc-500 ml-1">/ 2400 kcal</span>
+              </div>
+              <div>
+                <span className="text-xs text-zinc-400 block">Agua</span>
+                <span className="text-xl font-mono font-black text-sky-400">{waterToday}</span>
+                <span className="text-xs text-zinc-500 ml-1">/ 2500 ml</span>
+              </div>
+            </div>
+          </div>
+
+          <div onClick={() => onNav('evolucion')} className="rounded-2xl bg-zinc-900 border border-zinc-800 p-4 active:scale-98 transition cursor-pointer">
+            <div className="flex justify-between items-center pb-2 border-b border-zinc-800">
+              <div className="flex items-center gap-2">
+                <Icon name="scale" className="w-4 h-4 text-brand-400" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-white">Peso & Media 7d</h3>
+              </div>
+              <span className="text-xs text-brand-400 font-semibold">Ver gráfica</span>
+            </div>
+            <div className="mt-3 flex items-baseline justify-between">
+              <div>
+                <span className="text-xs text-zinc-400 block">Último Peso</span>
+                <span className="text-2xl font-mono font-black text-white">{latestWeight ? `${latestWeight.weightKg} kg` : '--'}</span>
+              </div>
+              {latestWeight && (
+                <div className="text-right">
+                  <span className="text-xs text-zinc-400 block">Media Móvil 7d</span>
+                  <span className="text-lg font-mono font-bold text-brand-400">{latestWeight.movingAverage7d} kg</span>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div onClick={() => onNav('entreno')} className="rounded-2xl bg-zinc-900 border border-zinc-800 p-4 active:scale-98 transition cursor-pointer">
+            <div className="flex items-center gap-2 pb-2 border-b border-zinc-800">
+              <Icon name="dumbbell" className="w-4 h-4 text-brand-400" />
+              <h3 className="text-xs font-bold uppercase tracking-wider text-white">Último Entreno</h3>
+            </div>
+            {lastWorkout ? (
+              <div className="mt-3">
+                <h4 className="font-bold text-white text-sm">{lastWorkout.routineName}</h4>
+                <div className="flex justify-between mt-1 text-xs text-zinc-400 font-mono">
+                  <span>{new Date(lastWorkout.startTime).toLocaleDateString('es-AR')}</span>
+                  <span>{lastWorkout.exercises.length} ejercicios completados</span>
+                </div>
+              </div>
+            ) : (
+              <p className="mt-3 text-xs text-zinc-500 italic">No registraste ningún entrenamiento todavía.</p>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // --- 2. MÓDULO DE ENTRENAMIENTO ---
+    function TrainingView() {
+      const [routines, setRoutines] = useState([]);
+      const [activeSession, setActiveSession] = useState(null);
+      const [newRoutineName, setNewRoutineName] = useState('');
+      const [isCreatingRoutine, setIsCreatingRoutine] = useState(false);
+      const [timerSecs, setTimerSecs] = useState(null);
+
+      const loadRoutines = async () => {
+        const r = await db.routines.toArray();
+        setRoutines(r);
+      };
+
+      useEffect(() => { loadRoutines(); }, []);
+
+      const startWorkout = (routine) => {
+        setActiveSession({
+          routineId: routine?.id || null,
+          routineName: routine?.name || 'Entrenamiento Libre',
+          startTime: Date.now(),
+          exercises: []
+        });
+      };
+
+      const handleCreateRoutine = async (e) => {
+        e.preventDefault();
+        if (!newRoutineName.trim()) return;
+        await db.routines.add({
+          id: `rot_${Date.now()}`,
+          name: newRoutineName.trim(),
+          exercises: [],
+          createdAt: Date.now()
+        });
+        setNewRoutineName('');
+        setIsCreatingRoutine(false);
+        loadRoutines();
+      };
+
+      // Si está en vivo entrenando:
+      if (activeSession) {
+        return (
+          <div className="p-4 max-w-lg mx-auto pb-32 space-y-4">
+            <div className="sticky top-0 bg-black/95 py-2 flex items-center justify-between border-b border-zinc-800 z-10">
+              <div>
+                <span className="text-[10px] font-bold text-brand-400 uppercase">En Vivo</span>
+                <h2 className="text-lg font-black text-white">{activeSession.routineName}</h2>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => setActiveSession(null)} className="px-3 py-1.5 text-xs text-zinc-400">Descartar</button>
+                <button
+                  onClick={async () => {
+                    if (activeSession.exercises.length === 0) { setActiveSession(null); return; }
+                    await db.workoutSessions.add({ ...activeSession, endTime: Date.now() });
+                    setActiveSession(null);
+                  }}
+                  className="px-4 py-1.5 bg-brand-500 text-black font-black text-xs uppercase rounded-xl"
+                >
+                  Finalizar
+                </button>
+              </div>
+            </div>
+
+            {/* Ejercicios de la sesión */}
+            {activeSession.exercises.map((ex, exIndex) => (
+              <div key={exIndex} className="rounded-2xl bg-zinc-900 border border-zinc-800 p-4 space-y-3">
+                <h4 className="font-bold text-white text-sm">{ex.name}</h4>
+                <div className="space-y-2">
+                  <div className="grid grid-cols-12 gap-2 text-[10px] font-bold text-zinc-400 uppercase text-center">
+                    <span className="col-span-2 text-left">#</span>
+                    <span className="col-span-3">Kg</span>
+                    <span className="col-span-3">Reps</span>
+                    <span className="col-span-2">1RM</span>
+                    <span className="col-span-2">OK</span>
+                  </div>
+                  {ex.sets.map((set, sIndex) => (
+                    <div key={sIndex} className={`grid grid-cols-12 gap-2 items-center p-1 rounded-xl ${set.completed ? 'bg-brand-950/20 border border-brand-500/30' : 'bg-zinc-800/40'}`}>
+                      <span className="col-span-2 text-xs font-mono font-bold text-zinc-400">S{sIndex + 1}</span>
+                      <input
+                        type="number"
+                        step="0.5"
+                        placeholder="0"
+                        value={set.weightKg || ''}
+                        onChange={(e) => {
+                          const updated = [...activeSession.exercises];
+                          updated[exIndex].sets[sIndex].weightKg = parseFloat(e.target.value) || 0;
+                          setActiveSession({ ...activeSession, exercises: updated });
+                        }}
+                        className="col-span-3 text-center bg-zinc-900 border border-zinc-700 rounded-lg py-1.5 text-xs font-mono font-bold text-white"
+                      />
+                      <input
+                        type="number"
+                        placeholder="0"
+                        value={set.reps || ''}
+                        onChange={(e) => {
+                          const updated = [...activeSession.exercises];
+                          updated[exIndex].sets[sIndex].reps = parseInt(e.target.value, 10) || 0;
+                          setActiveSession({ ...activeSession, exercises: updated });
+                        }}
+                        className="col-span-3 text-center bg-zinc-900 border border-zinc-700 rounded-lg py-1.5 text-xs font-mono font-bold text-white"
+                      />
+                      <span className="col-span-2 text-center text-xs font-mono text-zinc-400">
+                        {set.weightKg && set.reps ? calculate1RM(set.weightKg, set.reps) : '-'}
+                      </span>
+                      <button
+                        onClick={() => {
+                          const updated = [...activeSession.exercises];
+                          const newState = !set.completed;
+                          updated[exIndex].sets[sIndex].completed = newState;
+                          setActiveSession({ ...activeSession, exercises: updated });
+                          if (newState) setTimerSecs(90); // Auto timer de 90s
+                        }}
+                        className={`col-span-2 h-8 rounded-lg flex items-center justify-center ${set.completed ? 'bg-brand-500 text-black' : 'bg-zinc-800 text-zinc-400'}`}
+                      >
+                        <Icon name="check" className="w-4 h-4 stroke-[3]" />
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    onClick={() => {
+                      const updated = [...activeSession.exercises];
+                      const last = ex.sets[ex.sets.length - 1];
+                      updated[exIndex].sets.push({ weightKg: last ? last.weightKg : 0, reps: last ? last.reps : 10, completed: false });
+                      setActiveSession({ ...activeSession, exercises: updated });
+                    }}
+                    className="text-xs font-bold text-brand-400 flex items-center gap-1 pt-1"
+                  >
+                    + Agregar Serie
+                  </button>
+                </div>
+              </div>
+            ))}
+
+            {/* Añadir ejercicio rápido */}
+            <div className="p-3 bg-zinc-900/60 border border-dashed border-zinc-800 rounded-2xl">
+              <input
+                type="text"
+                id="quickExInput"
+                placeholder="Nombre del ejercicio (ej: Press Plano)"
+                className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-white"
+              />
+              <button
+                onClick={() => {
+                  const input = document.getElementById('quickExInput');
+                  if (!input.value.trim()) return;
+                  setActiveSession({
+                    ...activeSession,
+                    exercises: [
+                      ...activeSession.exercises,
+                      { name: input.value.trim(), sets: [{ weightKg: 0, reps: 10, completed: false }] }
+                    ]
+                  });
+                  input.value = '';
+                }}
+                className="w-full mt-2 py-2 bg-zinc-800 text-brand-400 font-bold text-xs rounded-xl"
+              >
+                + Añadir Ejercicio a esta sesión
+              </button>
+            </div>
+
+            {timerSecs && <RestTimer seconds={timerSecs} onClose={() => setTimerSecs(null)} />}
+          </div>
+        );
+      }
+
+      return (
+        <div className="p-4 space-y-4 max-w-lg mx-auto pb-28">
+          <div className="flex justify-between items-center">
+            <div>
+              <span className="text-xs uppercase font-bold text-brand-400">Módulo de Fuerza</span>
+              <h1 className="text-2xl font-black text-white">Entrenamiento</h1>
+            </div>
+            <button onClick={() => startWorkout(null)} className="px-3 py-1.5 bg-brand-500 text-black font-black text-xs uppercase rounded-xl flex items-center gap-1">
+              <Icon name="play" className="w-3.5 h-3.5 fill-black stroke-black" /> Libre
+            </button>
+          </div>
+
+          {/* Rutinas */}
+          <div className="space-y-3">
+            <div className="flex justify-between items-center">
+              <h2 className="text-xs font-bold uppercase tracking-wider text-zinc-400">Mis Rutinas</h2>
+              <button onClick={() => setIsCreatingRoutine(true)} className="text-xs text-brand-400 font-bold">+ Nueva Rutina</button>
+            </div>
+
+            {isCreatingRoutine && (
+              <form onSubmit={handleCreateRoutine} className="p-4 bg-zinc-900 border border-brand-500/40 rounded-2xl space-y-2">
+                <input
+                  type="text"
+                  placeholder="Ej: Empuje / Torso A"
+                  value={newRoutineName}
+                  onChange={(e) => setNewRoutineName(e.target.value)}
+                  className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-white"
+                />
+                <div className="flex justify-end gap-2">
+                  <button type="button" onClick={() => setIsCreatingRoutine(false)} className="text-xs text-zinc-400 px-3 py-1">Cancelar</button>
+                  <button type="submit" className="px-3 py-1 bg-brand-500 text-black font-bold text-xs rounded-lg">Crear</button>
+                </div>
+              </form>
+            )}
+
+            {routines.length === 0 && !isCreatingRoutine ? (
+              <div className="p-6 border border-dashed border-zinc-800 rounded-2xl text-center">
+                <p className="text-xs text-zinc-400">Sin rutinas cargadas. Creá tus días de entreno o iniciá uno libre arriba.</p>
+              </div>
+            ) : (
+              routines.map(r => (
+                <div key={r.id} className="p-4 bg-zinc-900 border border-zinc-800 rounded-xl flex justify-between items-center">
+                  <div>
+                    <h3 className="font-bold text-white text-sm">{r.name}</h3>
+                    <span className="text-[11px] text-zinc-500">Plantilla lista</span>
+                  </div>
+                  <button onClick={() => startWorkout(r)} className="h-9 w-9 bg-brand-500/10 text-brand-400 rounded-xl flex items-center justify-center">
+                    <Icon name="play" className="w-4 h-4 fill-brand-400 stroke-brand-400" />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // --- 3. MÓDULO DE NUTRICIÓN ---
+    function NutritionView() {
+      const [date, setDate] = useState(() => new Date().toISOString().split('T')[0]);
+      const [meals, setMeals] = useState([]);
+      const [water, setWater] = useState(0);
+      const [isAddingFood, setIsAddingFood] = useState(false);
+      const [foodName, setFoodName] = useState('');
+      const [grams, setGrams] = useState(100);
+      const [kcal, setKcal] = useState(0);
+      const [prot, setProt] = useState(0);
+      const [mealTime, setMealTime] = useState('desayuno');
+
+      const loadDayData = async () => {
+        const m = await db.loggedMeals.where('date').equals(date).toArray();
+        setMeals(m);
+        const w = await db.waterLogs.where('date').equals(date).toArray();
+        setWater(w.reduce((acc, curr) => acc + curr.amountMl, 0));
+      };
+
+      useEffect(() => { loadDayData(); }, [date]);
+
+      const addWater = async (amount) => {
+        await db.waterLogs.add({ id: `w_${Date.now()}`, date, amountMl: amount, timestamp: Date.now() });
+        loadDayData();
+      };
+
+      const handleAddFood = async (e) => {
+        e.preventDefault();
+        if (!foodName.trim()) return;
+        await db.loggedMeals.add({
+          id: `meal_${Date.now()}`,
+          date,
+          timestamp: Date.now(),
+          mealTime,
+          foodName: foodName.trim(),
+          quantityGrams: grams,
+          calories: kcal,
+          protein: prot,
+          carbs: 0,
+          fats: 0
+        });
+        setFoodName(''); setKcal(0); setProt(0);
+        setIsAddingFood(false);
+        loadDayData();
+      };
+
+      const totalKcal = meals.reduce((s, m) => s + m.calories, 0);
+      const totalProt = meals.reduce((s, m) => s + m.protein, 0);
+
+      return (
+        <div className="p-4 space-y-4 max-w-lg mx-auto pb-28">
+          <div className="flex justify-between items-center">
+            <div>
+              <span className="text-xs uppercase font-bold text-brand-400">Nutrición & Dieta</span>
+              <h1 className="text-2xl font-black text-white">Diario de Comidas</h1>
+            </div>
+            <button onClick={() => setIsAddingFood(true)} className="px-3 py-1.5 bg-brand-500 text-black font-black text-xs uppercase rounded-xl">
+              + Cargar Alimento
+            </button>
+          </div>
+
+          {/* Selector de Fecha */}
+          <div className="flex justify-between items-center bg-zinc-900 border border-zinc-800 p-2 rounded-xl">
+            <input
+              type="date"
+              value={date}
+              onChange={(e) => setDate(e.target.value)}
+              className="bg-transparent text-white font-mono text-xs focus:outline-none"
+            />
+            <span className="text-xs text-brand-400 font-mono font-bold">{formatDate(date)}</span>
+          </div>
+
+          {/* Resumen Macros */}
+          <div className="p-4 bg-zinc-900 border border-zinc-800 rounded-2xl grid grid-cols-2 gap-4">
+            <div>
+              <span className="text-xs text-zinc-400 block">Calorías Totales</span>
+              <span className="text-2xl font-black font-mono text-white">{totalKcal}</span>
+              <span className="text-xs text-zinc-500 ml-1">/ 2400 kcal</span>
+            </div>
+            <div>
+              <span className="text-xs text-zinc-400 block">Proteínas</span>
+              <span className="text-2xl font-black font-mono text-brand-400">{totalProt}g</span>
+              <span className="text-xs text-zinc-500 ml-1">/ 160g</span>
+            </div>
+          </div>
+
+          {/* Hidratación */}
+          <div className="p-4 bg-zinc-900 border border-zinc-800 rounded-2xl space-y-2">
+            <div className="flex justify-between items-center text-xs">
+              <span className="font-bold text-zinc-300 flex items-center gap-1">
+                <Icon name="droplet" className="w-4 h-4 text-sky-400" /> Hidratación
+              </span>
+              <span className="font-mono text-sky-400 font-bold">{water} / 2500 ml</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2 pt-1">
+              <button onClick={() => addWater(250)} className="py-2 bg-zinc-800 text-sky-300 text-xs font-bold rounded-xl">+250 ml (Vaso)</button>
+              <button onClick={() => addWater(500)} className="py-2 bg-zinc-800 text-sky-300 text-xs font-bold rounded-xl">+500 ml (Botella)</button>
+            </div>
+          </div>
+
+          {/* Modal Carga */}
+          {isAddingFood && (
+            <form onSubmit={handleAddFood} className="p-4 bg-zinc-900 border border-brand-500/40 rounded-2xl space-y-3">
+              <h3 className="text-xs font-bold text-white uppercase">Registrar Alimento</h3>
+              <select value={mealTime} onChange={(e) => setMealTime(e.target.value)} className="w-full bg-zinc-800 border border-zinc-700 p-2 rounded-xl text-xs text-white">
+                <option value="desayuno">Desayuno</option>
+                <option value="almuerzo">Almuerzo</option>
+                <option value="merienda">Merienda</option>
+                <option value="cena">Cena</option>
+                <option value="colacion">Colación</option>
+              </select>
+              <input type="text" placeholder="Alimento (ej: Pechuga de pollo)" value={foodName} onChange={(e) => setFoodName(e.target.value)} className="w-full bg-zinc-800 border border-zinc-700 p-2 rounded-xl text-xs text-white" />
+              <div className="grid grid-cols-3 gap-2">
+                <input type="number" placeholder="Gramos" value={grams || ''} onChange={(e) => setGrams(Number(e.target.value))} className="bg-zinc-800 border border-zinc-700 p-2 rounded-xl text-xs text-white text-center" />
+                <input type="number" placeholder="Kcal" value={kcal || ''} onChange={(e) => setKcal(Number(e.target.value))} className="bg-zinc-800 border border-zinc-700 p-2 rounded-xl text-xs text-white text-center" />
+                <input type="number" placeholder="Prot (g)" value={prot || ''} onChange={(e) => setProt(Number(e.target.value))} className="bg-zinc-800 border border-zinc-700 p-2 rounded-xl text-xs text-white text-center" />
+              </div>
+              <div className="flex justify-end gap-2 pt-1">
+                <button type="button" onClick={() => setIsAddingFood(false)} className="text-xs text-zinc-400 px-3 py-1">Cancelar</button>
+                <button type="submit" className="px-4 py-1.5 bg-brand-500 text-black font-bold text-xs rounded-xl">Guardar</button>
+              </div>
+            </form>
+          )}
+
+          {/* Lista de Comidas */}
+          <div className="space-y-2">
+            {meals.map(m => (
+              <div key={m.id} className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl flex justify-between items-center">
+                <div>
+                  <span className="text-[10px] uppercase font-bold text-brand-400 block">{m.mealTime}</span>
+                  <span className="text-xs font-bold text-white">{m.foodName}</span>
+                  <span className="text-[11px] text-zinc-500 ml-1 font-mono">({m.quantityGrams}g)</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs font-mono font-bold text-zinc-300">{m.calories} kcal</span>
+                  <button onClick={async () => { await db.loggedMeals.delete(m.id); loadDayData(); }} className="text-zinc-500 hover:text-red-400">
+                    <Icon name="trash" className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // --- 4. MÓDULO DE EVOLUCIÓN FÍSICA ---
+    function EvolutionView() {
+      const [weights, setWeights] = useState([]);
+      const [weightInput, setWeightInput] = useState('');
+      const [dateInput, setDateInput] = useState(() => new Date().toISOString().split('T')[0]);
+
+      const loadWeights = async () => {
+        const w = await db.weightEntries.orderBy('date').toArray();
+        setWeights(calculateWeightMovingAverage(w));
+      };
+
+      useEffect(() => { loadWeights(); }, []);
+
+      const handleAddWeight = async (e) => {
+        e.preventDefault();
+        const num = parseFloat(weightInput);
+        if (!num) return;
+        await db.weightEntries.put({ id: `w_${dateInput}`, date: dateInput, timestamp: Date.now(), weightKg: num });
+        setWeightInput('');
+        loadWeights();
+      };
+
+      return (
+        <div className="p-4 space-y-4 max-w-lg mx-auto pb-28">
+          <div>
+            <span className="text-xs uppercase font-bold text-brand-400">Antropometría</span>
+            <h1 className="text-2xl font-black text-white">Peso & Media 7d</h1>
+          </div>
+
+          <form onSubmit={handleAddWeight} className="p-4 bg-zinc-900 border border-zinc-800 rounded-2xl space-y-3">
+            <h3 className="text-xs font-bold text-zinc-400 uppercase">Registrar Pesaje</h3>
+            <div className="grid grid-cols-2 gap-2">
+              <input type="date" value={dateInput} onChange={(e) => setDateInput(e.target.value)} className="bg-zinc-800 border border-zinc-700 p-2 rounded-xl text-xs text-white font-mono" />
+              <input type="number" step="0.1" placeholder="Ej: 78.5 kg" value={weightInput} onChange={(e) => setWeightInput(e.target.value)} className="bg-zinc-800 border border-zinc-700 p-2 rounded-xl text-xs text-white text-center font-bold" />
+            </div>
+            <button type="submit" className="w-full py-2 bg-brand-500 text-black font-black text-xs uppercase rounded-xl">Guardar Peso</button>
+          </form>
+
+          {/* Historial con Media Móvil */}
+          <div className="space-y-2">
+            <h4 className="text-xs font-bold uppercase text-zinc-400">Historial Reciente</h4>
+            {weights.slice().reverse().map(entry => (
+              <div key={entry.date} className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl flex justify-between items-center text-xs">
+                <div>
+                  <span className="font-mono text-zinc-400">{formatDate(entry.date)}</span>
+                  <span className="ml-3 font-mono font-bold text-white text-sm">{entry.weightKg} kg</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-mono text-brand-400 font-bold">Media: {entry.movingAverage7d}k</span>
+                  <button onClick={async () => { await db.weightEntries.delete(entry.id); loadWeights(); }} className="text-zinc-500 hover:text-red-400">
+                    <Icon name="trash" className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // --- 5. MÓDULO DE AJUSTES & BACKUP ---
+    function SettingsView() {
+      const exportJSON = async () => {
+        const [routines, sessions, meals, water, weights] = await Promise.all([
+          db.routines.toArray(),
+          db.workoutSessions.toArray(),
+          db.loggedMeals.toArray(),
+          db.waterLogs.toArray(),
+          db.weightEntries.toArray()
+        ]);
+        const backup = { routines, sessions, meals, water, weights };
+        const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `YoFuturo_Backup_${new Date().toISOString().split('T')[0]}.json`;
+        a.click();
+      };
+
+      const importJSON = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = async (evt) => {
+          try {
+            const data = JSON.parse(evt.target.result);
+            if (data.routines) await db.routines.bulkPut(data.routines);
+            if (data.sessions) await db.workoutSessions.bulkPut(data.sessions);
+            if (data.meals) await db.loggedMeals.bulkPut(data.meals);
+            if (data.water) await db.waterLogs.bulkPut(data.water);
+            if (data.weights) await db.weightEntries.bulkPut(data.weights);
+            alert('¡Copia de seguridad restaurada con éxito!');
+          } catch(err) {
+            alert('Error al leer el archivo JSON.');
+          }
+        };
+        reader.readAsText(file);
+      };
+
+      return (
+        <div className="p-4 space-y-4 max-w-lg mx-auto pb-28">
+          <div>
+            <span className="text-xs uppercase font-bold text-brand-400">Seguridad</span>
+            <h1 className="text-2xl font-black text-white">Copias de Respaldo</h1>
+          </div>
+          <div className="p-4 bg-zinc-900 border border-zinc-800 rounded-2xl space-y-3">
+            <button onClick={exportJSON} className="w-full py-3 bg-zinc-800 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-2">
+              <Icon name="download" className="w-4 h-4 text-brand-400" /> Exportar Backup (JSON)
+            </button>
+            <label className="w-full py-3 bg-zinc-800 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-2 cursor-pointer">
+              <Icon name="upload" className="w-4 h-4 text-brand-400" /> Restaurar Backup (JSON)
+              <input type="file" accept=".json" onChange={importJSON} className="hidden" />
+            </label>
+          </div>
+          <p className="text-center text-xs text-zinc-600 font-mono">Yo Futuro v1.0.0 (Autónomo)</p>
+        </div>
+      );
+    }
+
+    // --- APLICACIÓN PRINCIPAL & NAVEGACIÓN ---
+    function App() {
+      const [tab, setTab] = useState('inicio');
+
+      return (
+        <div className="min-h-screen bg-black text-zinc-100 flex flex-col justify-between">
+          <main>
+            {tab === 'inicio' && <HomeDashboard onNav={setTab} />}
+            {tab === 'entreno' && <TrainingView />}
+            {tab === 'nutricion' && <NutritionView />}
+            {tab === 'evolucion' && <EvolutionView />}
+            {tab === 'ajustes' && <SettingsView />}
+          </main>
+
+          {/* Barra de Navegación Inferior Fija para Celular */}
+          <nav className="fixed bottom-0 left-0 right-0 bg-zinc-950/95 border-t border-zinc-800/80 backdrop-blur-md z-40">
+            <div className="flex h-16 max-w-lg mx-auto items-center justify-around px-2">
+              {[
+                { id: 'inicio', label: 'Inicio', icon: 'home' },
+                { id: 'entreno', label: 'Entreno', icon: 'dumbbell' },
+                { id: 'nutricion', label: 'Nutrición', icon: 'utensils' },
+                { id: 'evolucion', label: 'Evolución', icon: 'trending' },
+                { id: 'ajustes', label: 'Ajustes', icon: 'settings' }
+              ].map(t => {
+                const active = tab === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    onClick={() => setTab(t.id)}
+                    className={`flex flex-col items-center justify-center flex-1 transition active:scale-90 ${active ? 'text-brand-400' : 'text-zinc-500'}`}
+                  >
+                    <Icon name={t.icon} className={`w-5 h-5 ${active ? 'stroke-[2.5]' : ''}`} />
+                    <span className={`text-[10px] mt-1 ${active ? 'font-bold text-brand-400' : 'font-medium'}`}>{t.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </nav>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
